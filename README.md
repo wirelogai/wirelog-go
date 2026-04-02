@@ -2,6 +2,8 @@
 
 [WireLog](https://wirelog.ai) analytics client for Go. **Zero dependencies** — stdlib only.
 
+> Headless alternative to PostHog, Amplitude, and Mixpanel — designed for agents instead of dashboards.
+
 ## Install
 
 ```bash
@@ -193,5 +195,6 @@ This library uses only the Go standard library (`net/http`, `encoding/json`, `cr
 ## Learn More
 
 - [WireLog](https://wirelog.ai) — headless analytics for agents and LLMs
+- [Why WireLog vs PostHog/Amplitude](https://docs.wirelog.ai/guides/vs-posthog/) — comparison guide
 - [Query language docs](https://docs.wirelog.ai/query-language/overview/)
 - [API reference](https://docs.wirelog.ai/reference/api/)
