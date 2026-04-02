@@ -193,5 +193,5 @@ This library uses only the Go standard library (`net/http`, `encoding/json`, `cr
 ## Learn More
 
 - [WireLog](https://wirelog.ai) — headless analytics for agents and LLMs
-- [Query language docs](https://docs.wirelog.ai/query-language)
-- [API reference](https://docs.wirelog.ai/reference/api)
+- [Query language docs](https://docs.wirelog.ai/query-language/overview/)
+- [API reference](https://docs.wirelog.ai/reference/api/)
