@@ -101,6 +101,10 @@ func testClient(url string, opts ...func(*Config)) *Client {
 		FlushInterval: 50 * time.Millisecond,
 		QueueSize:     1000,
 		HTTPTimeout:   5 * time.Second,
+		// Existing tests predate the rate limiter and expect to push through
+		// arbitrary event volumes without throttling. New tests that exercise
+		// the limiter opt back in explicitly.
+		RateLimit: RateLimitConfig{Disabled: true},
 	}
 	for _, opt := range opts {
 		opt(&cfg)

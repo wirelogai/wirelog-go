@@ -60,9 +60,10 @@ This client is designed to **never break your application**:
 
 - **Non-blocking**: `Track()` enqueues events and returns immediately — it never makes HTTP calls on the caller's goroutine
 - **Bounded memory**: Internal queue has a fixed capacity (default 10,000). When full, new events are dropped rather than causing OOM
+- **Rate-limited by default**: A per-instance token bucket and rolling windows protect against hot-loop bugs (see [Rate limiting](#rate-limiting))
 - **Graceful shutdown**: `Close()` flushes all remaining events before returning
 - **Automatic batching**: Events are sent in batches (default 10 per batch, or every 2 seconds)
-- **Retry with backoff**: Transient failures (429, 5xx) are retried up to 3 times with exponential backoff
+- **Retry with backoff**: Transient failures (429, 5xx) are retried up to 3 times with exponential backoff. Honours the server's `Retry-After` header on 429.
 - **Panic recovery**: The background worker recovers from panics and reports them via `OnError`
 - **No panics**: The client never panics — all errors are handled internally or returned
 
@@ -98,9 +99,55 @@ client := wirelog.New(wirelog.Config{
 
     // Disable all tracking (Track becomes no-op). Useful for tests.
     Disabled: os.Getenv("ENV") == "test",
+
+    // Per-instance rate limiter (defaults are conservative — see below).
+    RateLimit: wirelog.RateLimitConfig{
+        EventsPerSecond: 1,    // token bucket refill rate
+        Burst:           10,   // token bucket capacity
+        EventsPerMinute: 60,
+        EventsPerHour:   1000,
+        EventsPerDay:    10000,
+        MaxEventBytes:   65536, // 64 KiB per event
+    },
 })
 defer client.Close()
 ```
+
+## Rate limiting
+
+Every client instance enforces a layered rate limit so a hot loop or
+runaway code path can't trash your application or our backend:
+
+| Layer | Default | What it catches |
+|---|---|---|
+| Token bucket | 1 evt/s, burst 10 | Hot loops (`for { Track() }`) — they hit the wall in microseconds |
+| Per-minute window | 60 | Sustained chatty bugs (e.g. tracking inside a 60fps render loop) |
+| Per-hour window | 1,000 | Slow leaks (1/sec for hours) |
+| Per-day window | 10,000 | Multi-day issues |
+| Per-event payload | 64 KiB | Pathologically large event properties |
+
+When a check rejects an event, it's silently dropped and the corresponding
+counter in `RateLimitStats` is incremented. Use `client.RateLimitStats()`
+to inspect counters. Callers can also subscribe to `OnError` to receive
+`ErrRateLimited` and `ErrPayloadTooLarge` per drop (note: high-volume
+floods will fire many callbacks; read `RateLimitStats()` instead for hot
+paths).
+
+```go
+stats := client.RateLimitStats()
+log.Printf("dropped: burst=%d minute=%d hour=%d day=%d size=%d",
+    stats.DroppedBurst, stats.DroppedPerMinute, stats.DroppedPerHour,
+    stats.DroppedPerDay, stats.DroppedPayloadSize)
+```
+
+To disable rate limiting entirely (e.g., for trusted batch import):
+
+```go
+RateLimit: wirelog.RateLimitConfig{Disabled: true}
+```
+
+To loosen a single window without disabling the rest, set it to a very
+large value. Setting any single field to zero leaves it at the default.
 
 ## API
 
@@ -179,6 +226,10 @@ client := wirelog.New(wirelog.Config{
             log.Printf("wirelog API error %d: %s", apiErr.StatusCode, apiErr.Body)
         } else if errors.Is(err, wirelog.ErrQueueFull) {
             log.Print("wirelog: event dropped, queue full")
+        } else if errors.Is(err, wirelog.ErrRateLimited) {
+            log.Printf("wirelog: %v", err) // per-instance rate limiter
+        } else if errors.Is(err, wirelog.ErrPayloadTooLarge) {
+            log.Print("wirelog: event dropped, payload exceeded MaxEventBytes")
         } else {
             log.Printf("wirelog: %v", err)
         }

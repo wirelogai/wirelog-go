@@ -28,6 +28,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -35,7 +36,7 @@ import (
 )
 
 // Version is the client library version.
-const Version = "0.1.0"
+const Version = "0.2.0"
 
 const (
 	defaultHost          = "https://api.wirelog.ai"
@@ -60,12 +61,23 @@ var (
 	// ErrQueueFull is passed to OnError when an event is dropped because the
 	// internal buffer is at capacity.
 	ErrQueueFull = errors.New("wirelog: event dropped (queue full)")
+
+	// ErrRateLimited is passed to OnError when an event is dropped by the
+	// per-client-instance rate limiter (burst or sustained windows).
+	ErrRateLimited = errors.New("wirelog: event dropped (rate limited)")
+
+	// ErrPayloadTooLarge is passed to OnError when an event's serialized JSON
+	// exceeds the configured per-event size cap (default 64 KiB).
+	ErrPayloadTooLarge = errors.New("wirelog: event dropped (payload too large)")
 )
 
 // APIError is returned when the WireLog API responds with a non-2xx status.
+// RetryAfter is set to the parsed Retry-After header duration on 429 responses
+// (zero if absent or unparseable).
 type APIError struct {
 	StatusCode int
 	Body       string
+	RetryAfter time.Duration
 }
 
 func (e *APIError) Error() string {
@@ -107,6 +119,12 @@ type Config struct {
 	// Disabled disables all tracking. Track() becomes a no-op.
 	// Query and Identify still work. Useful for test environments.
 	Disabled bool
+
+	// RateLimit configures per-client-instance burst and sustained limits,
+	// plus the per-event payload size cap. Zero-valued fields use sensible
+	// defaults (1/sec burst with capacity 10, 60/min, 1000/hr, 10000/day,
+	// 64 KiB max event size). Set RateLimit.Disabled = true to bypass.
+	RateLimit RateLimitConfig
 }
 
 // Event represents a single analytics event.
@@ -183,6 +201,8 @@ type Client struct {
 	stopped    chan struct{}
 	closed     atomic.Bool
 	wg         sync.WaitGroup
+	limiter    *rateLimiter
+	now        func() time.Time // override for tests; defaults to time.Now
 }
 
 // New creates a new WireLog client and starts a background flush worker.
@@ -221,7 +241,9 @@ func New(cfg Config) *Client {
 		queue:      make(chan Event, cfg.QueueSize),
 		flushCh:    make(chan chan error, 1),
 		stopped:    make(chan struct{}),
+		now:        time.Now,
 	}
+	c.limiter = newRateLimiter(cfg.RateLimit, c.now)
 
 	if !cfg.Disabled {
 		c.wg.Add(1)
@@ -231,9 +253,29 @@ func New(cfg Config) *Client {
 	return c
 }
 
+// newWithClock is a test helper that constructs a client with an injectable
+// clock used for both event timestamps and rate-limiter timing.
+func newWithClock(cfg Config, now func() time.Time) *Client {
+	c := New(cfg)
+	if now != nil {
+		c.now = now
+		c.limiter = newRateLimiter(cfg.RateLimit, now)
+	}
+	return c
+}
+
+// RateLimitStats returns a snapshot of rate-limiter drop counters.
+// Safe to call concurrently.
+func (c *Client) RateLimitStats() RateLimitStats {
+	return c.limiter.Stats()
+}
+
 // Track enqueues an event for asynchronous delivery. It never blocks and
-// never returns an error. If the internal queue is full, the event is
-// dropped and OnError is called (if configured).
+// never returns an error. The event is dropped (and OnError is called if
+// configured) when any of the following apply:
+//   - the per-client-instance rate limiter rejects it (burst or sustained);
+//   - its serialized JSON exceeds the configured per-event size cap;
+//   - the internal buffer is at capacity.
 //
 // Track auto-generates insert_id and time if not set on the event.
 func (c *Client) Track(event Event) {
@@ -241,14 +283,31 @@ func (c *Client) Track(event Event) {
 		return
 	}
 
+	// L1+L2: rate limit BEFORE any allocation so a hot loop is cheap.
+	if reason := c.limiter.Allow(); reason != DropNone {
+		c.reportError(fmt.Errorf("%w: %s", ErrRateLimited, reason))
+		return
+	}
+
 	if event.InsertID == "" {
 		event.InsertID = generateInsertID()
 	}
 	if event.Time == "" {
-		event.Time = time.Now().UTC().Format(time.RFC3339)
+		event.Time = c.now().UTC().Format(time.RFC3339)
 	}
 	if event.Library == "" {
 		event.Library = "wirelog-go/" + Version
+	}
+
+	// L5: per-event payload size cap. Check after enrichment so we measure
+	// the true wire size, but reject before queueing.
+	if maxBytes := c.limiter.MaxEventBytes(); maxBytes > 0 {
+		body, err := json.Marshal(event)
+		if err != nil || len(body) > maxBytes {
+			c.limiter.recordPayloadDrop()
+			c.reportError(ErrPayloadTooLarge)
+			return
+		}
 	}
 
 	select {
@@ -323,7 +382,15 @@ func (c *Client) Query(ctx context.Context, q string, opts ...QueryOption) (any,
 }
 
 // Identify binds a device to a user and/or sets profile properties.
+//
+// Identify counts against the same per-instance rate limiter as Track so a
+// component remount loop or startup loop can't open unbounded identify
+// requests. When the limiter rejects the call, ErrRateLimited is returned.
 func (c *Client) Identify(ctx context.Context, params IdentifyParams) (*IdentifyResult, error) {
+	if reason := c.limiter.Allow(); reason != DropNone {
+		return nil, fmt.Errorf("%w: %s", ErrRateLimited, reason)
+	}
+
 	result, err := c.post(ctx, "/identify", params)
 	if err != nil {
 		return nil, err
@@ -433,7 +500,13 @@ func (c *Client) sendBatchWithRetry(events []Event) {
 			return
 		}
 
-		delay := retryBaseDelay << uint(attempt) //nolint:gosec // intentional shift for backoff
+		// L6: prefer the server-provided Retry-After when present.
+		var delay time.Duration
+		if errors.As(err, &apiErr) && apiErr.RetryAfter > 0 {
+			delay = apiErr.RetryAfter
+		} else {
+			delay = retryBaseDelay << uint(attempt) //nolint:gosec // intentional shift for backoff
+		}
 		if delay > maxRetryDelay {
 			delay = maxRetryDelay
 		}
@@ -469,7 +542,11 @@ func (c *Client) sendBatch(events []Event) error {
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 
 	if resp.StatusCode >= http.StatusBadRequest {
-		return &APIError{StatusCode: resp.StatusCode, Body: string(respBody)}
+		return &APIError{
+			StatusCode: resp.StatusCode,
+			Body:       string(respBody),
+			RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After"), c.now()),
+		}
 	}
 
 	return nil
@@ -499,7 +576,11 @@ func (c *Client) post(ctx context.Context, path string, body any) (any, error) {
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 
 	if resp.StatusCode >= http.StatusBadRequest {
-		return nil, &APIError{StatusCode: resp.StatusCode, Body: string(respBody)}
+		return nil, &APIError{
+			StatusCode: resp.StatusCode,
+			Body:       string(respBody),
+			RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After"), c.now()),
+		}
 	}
 
 	contentType := resp.Header.Get("Content-Type")
@@ -518,6 +599,30 @@ func (c *Client) post(ctx context.Context, path string, body any) (any, error) {
 
 func isRetryable(status int) bool {
 	return status == http.StatusTooManyRequests || (status >= http.StatusInternalServerError && status < 600)
+}
+
+// parseRetryAfter parses a Retry-After header value, supporting both the
+// delta-seconds form and the HTTP-date form. Returns 0 if the value is
+// missing or unparseable. Negative or zero deltas return 0.
+func parseRetryAfter(header string, now time.Time) time.Duration {
+	header = strings.TrimSpace(header)
+	if header == "" {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(header); err == nil {
+		if seconds <= 0 {
+			return 0
+		}
+		return time.Duration(seconds) * time.Second
+	}
+	if when, err := http.ParseTime(header); err == nil {
+		delta := when.Sub(now)
+		if delta <= 0 {
+			return 0
+		}
+		return delta
+	}
+	return 0
 }
 
 func (c *Client) reportError(err error) {
