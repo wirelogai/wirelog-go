@@ -36,7 +36,7 @@ import (
 )
 
 // Version is the client library version.
-const Version = "0.2.0"
+const Version = "0.3.0"
 
 const (
 	defaultHost          = "https://api.wirelog.ai"
@@ -149,18 +149,18 @@ type TrackResult struct {
 
 // IdentifyParams holds parameters for the Identify call.
 type IdentifyParams struct {
-	UserID          string          `json:"user_id"`
-	DeviceID        string          `json:"device_id,omitempty"`
-	UserProperties  map[string]any  `json:"user_properties,omitempty"`
+	UserID          string           `json:"user_id"`
+	DeviceID        string           `json:"device_id,omitempty"`
+	UserProperties  map[string]any   `json:"user_properties,omitempty"`
 	UserPropertyOps *UserPropertyOps `json:"user_property_ops,omitempty"`
 }
 
 // UserPropertyOps supports atomic profile property operations.
 type UserPropertyOps struct {
-	Set     map[string]any     `json:"$set,omitempty"`     //nolint:tagliatelle // matches API field name
+	Set     map[string]any     `json:"$set,omitempty"`      //nolint:tagliatelle // matches API field name
 	SetOnce map[string]any     `json:"$set_once,omitempty"` //nolint:tagliatelle // matches API field name
-	Add     map[string]float64 `json:"$add,omitempty"`     //nolint:tagliatelle // matches API field name
-	Unset   []string           `json:"$unset,omitempty"`   //nolint:tagliatelle // matches API field name
+	Add     map[string]float64 `json:"$add,omitempty"`      //nolint:tagliatelle // matches API field name
+	Unset   []string           `json:"$unset,omitempty"`    //nolint:tagliatelle // matches API field name
 }
 
 // IdentifyResult is the API response from an identify call.
@@ -234,7 +234,6 @@ func New(cfg Config) *Client {
 	if cfg.HTTPTimeout <= 0 {
 		cfg.HTTPTimeout = defaultHTTPTimeout
 	}
-
 	c := &Client{
 		cfg:        cfg,
 		httpClient: &http.Client{Timeout: cfg.HTTPTimeout},
