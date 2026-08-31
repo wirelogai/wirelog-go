@@ -302,6 +302,27 @@ func TestRateLimiterDisabledAllowsEverything(t *testing.T) {
 	}
 }
 
+func TestDefaultRateLimiterAllowsBackendTraffic(t *testing.T) {
+	clock := newFakeClock(epoch)
+	r := newRateLimiter(RateLimitConfig{}, clock.Now)
+
+	// A backend process emitting 100,000 events/day averages roughly 4,167/hour.
+	// This is ordinary application telemetry, not a runaway loop, and remains far
+	// below WireLog's default project ingestion limits.
+	const eventsPerDay = 100_000
+	interval := 24 * time.Hour / eventsPerDay
+	for i := range eventsPerDay {
+		if got := r.Allow(); got != DropNone {
+			t.Fatalf("default limiter dropped backend event %d: %s", i, got)
+		}
+		clock.Advance(interval)
+	}
+
+	if got := r.Stats().Total(); got != 0 {
+		t.Fatalf("default limiter recorded drops for backend traffic: %d", got)
+	}
+}
+
 // --- rateLimiter Stats ---
 
 func TestRateLimiterStatsCountsByReason(t *testing.T) {

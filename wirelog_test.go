@@ -384,33 +384,26 @@ func TestDisabledClientIsNoOp(t *testing.T) {
 }
 
 func TestQueueFullDropsEvent(t *testing.T) {
-	m := newMockServer()
-	defer m.close()
-
 	var dropped atomic.Int32
+	c := &Client{
+		cfg: Config{
+			OnError: func(err error) {
+				if errors.Is(err, ErrQueueFull) {
+					dropped.Add(1)
+				}
+			},
+		},
+		queue:   make(chan Event, 2),
+		limiter: newRateLimiter(RateLimitConfig{Disabled: true}, time.Now),
+		now:     time.Now,
+	}
 
-	c := testClient(m.url(), func(cfg *Config) {
-		cfg.QueueSize = 2
-		cfg.BatchSize = 100
-		cfg.FlushInterval = time.Hour
-		cfg.OnError = func(err error) {
-			if err == ErrQueueFull {
-				dropped.Add(1)
-			}
-		}
-	})
-
-	// Fill queue.
 	for range 10 {
 		c.Track(Event{EventType: "test"})
 	}
 
-	if dropped.Load() == 0 {
-		t.Error("expected some events to be dropped")
-	}
-
-	if err := c.Close(); err != nil {
-		t.Fatalf("close: %v", err)
+	if got := dropped.Load(); got != 8 {
+		t.Errorf("expected 8 events to be dropped, got %d", got)
 	}
 }
 
@@ -895,4 +888,3 @@ func TestGenerateInsertID(t *testing.T) {
 		t.Errorf("expected 32-char hex ID, got %d chars: %s", len(id1), id1)
 	}
 }
-

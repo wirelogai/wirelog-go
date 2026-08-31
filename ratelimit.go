@@ -9,11 +9,11 @@ import (
 // Defaults applied when RateLimitConfig fields are zero. Setting
 // RateLimitConfig.Disabled = true bypasses all checks regardless of these.
 const (
-	defaultEventsPerSecond = 1.0
-	defaultBurst           = 10
-	defaultEventsPerMinute = 60
-	defaultEventsPerHour   = 1000
-	defaultEventsPerDay    = 10000
+	defaultEventsPerSecond = 200.0
+	defaultBurst           = 2000
+	defaultEventsPerMinute = 10000
+	defaultEventsPerHour   = 500000
+	defaultEventsPerDay    = 10000000
 	defaultMaxEventBytes   = 65536 // 64 KiB
 )
 
@@ -64,19 +64,19 @@ type RateLimitConfig struct {
 	// Disabled bypasses all rate limit checks (token bucket and windows).
 	Disabled bool
 
-	// EventsPerSecond is the token bucket refill rate. Default 1.
+	// EventsPerSecond is the token bucket refill rate. Default 200.
 	EventsPerSecond float64
 
-	// Burst is the token bucket capacity. Default 10.
+	// Burst is the token bucket capacity. Default 2000.
 	Burst int
 
-	// EventsPerMinute is the rolling 60-second cap. Default 60.
+	// EventsPerMinute is the rolling 60-second cap. Default 10000.
 	EventsPerMinute int
 
-	// EventsPerHour is the rolling 60-minute cap. Default 1000.
+	// EventsPerHour is the rolling 60-minute cap. Default 500000.
 	EventsPerHour int
 
-	// EventsPerDay is the rolling 24-hour cap. Default 10000.
+	// EventsPerDay is the rolling 24-hour cap. Default 10000000.
 	EventsPerDay int
 
 	// MaxEventBytes is the per-event JSON size cap. Default 65536 (64 KiB).

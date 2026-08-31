@@ -122,8 +122,9 @@ type Config struct {
 
 	// RateLimit configures per-client-instance burst and sustained limits,
 	// plus the per-event payload size cap. Zero-valued fields use sensible
-	// defaults (1/sec burst with capacity 10, 60/min, 1000/hr, 10000/day,
-	// 64 KiB max event size). Set RateLimit.Disabled = true to bypass.
+	// server defaults (200/sec burst with capacity 2000, 10000/min,
+	// 500000/hr, 10000000/day, 64 KiB max event size). Set
+	// RateLimit.Disabled = true to bypass.
 	RateLimit RateLimitConfig
 }
 

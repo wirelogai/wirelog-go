@@ -100,13 +100,14 @@ client := wirelog.New(wirelog.Config{
     // Disable all tracking (Track becomes no-op). Useful for tests.
     Disabled: os.Getenv("ENV") == "test",
 
-    // Per-instance rate limiter (defaults are conservative — see below).
+    // Per-instance rate limiter (defaults match WireLog's server-side
+    // project ingestion envelope — see below).
     RateLimit: wirelog.RateLimitConfig{
-        EventsPerSecond: 1,    // token bucket refill rate
-        Burst:           10,   // token bucket capacity
-        EventsPerMinute: 60,
-        EventsPerHour:   1000,
-        EventsPerDay:    10000,
+        EventsPerSecond: 200,  // token bucket refill rate
+        Burst:           2000, // token bucket capacity
+        EventsPerMinute: 10000,
+        EventsPerHour:   500000,
+        EventsPerDay:    10000000,
         MaxEventBytes:   65536, // 64 KiB per event
     },
 })
@@ -120,11 +121,16 @@ runaway code path can't trash your application or our backend:
 
 | Layer | Default | What it catches |
 |---|---|---|
-| Token bucket | 1 evt/s, burst 10 | Hot loops (`for { Track() }`) — they hit the wall in microseconds |
-| Per-minute window | 60 | Sustained chatty bugs (e.g. tracking inside a 60fps render loop) |
-| Per-hour window | 1,000 | Slow leaks (1/sec for hours) |
-| Per-day window | 10,000 | Multi-day issues |
+| Token bucket | 200 evt/s, burst 2,000 | Extreme hot loops (`for { Track() }`) without throttling legitimate backend concurrency |
+| Per-minute window | 10,000 | Matches the default WireLog project limit |
+| Per-hour window | 500,000 | Matches the default WireLog project limit |
+| Per-day window | 10,000,000 | Matches the default WireLog project limit |
 | Per-event payload | 64 KiB | Pathologically large event properties |
+
+Go processes commonly aggregate traffic for an entire backend. These defaults
+therefore mirror the service's project ingestion limits instead of using the
+much lower limits appropriate for a browser or other many-instance client. A
+project policy override may still be higher or lower than these defaults.
 
 When a check rejects an event, it's silently dropped and the corresponding
 counter in `RateLimitStats` is incremented. Use `client.RateLimitStats()`
